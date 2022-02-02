@@ -45,47 +45,24 @@ TMG Transit Assignment Tool
 
     V 2.0.2 Updated to receive JSON file parameters from Python API call
 """
-
 import traceback as _traceback
 import time as _time
 import multiprocessing
 from typing import DefaultDict
 import inro.modeller as _m
 from contextlib import contextmanager
-import random
-import json
-import csv
-
 
 _m.TupleType = object
 _m.ListType = list
 _m.InstanceType = object
-
 _trace = _m.logbook_trace
 _write = _m.logbook_write
 _MODELLER = _m.Modeller()
 _bank = _MODELLER.emmebank
 _util = _MODELLER.module("tmg2.utilities.general_utilities")
 _tmg_tpb = _MODELLER.module("tmg2.utilities.TMG_tool_page_builder")
-_net_edit = _MODELLER.module("tmg2.utilities.network_editing")
-# congestedAssignmentTool = _MODELLER.tool('inro.emme.transit_assignment.congested_transit_assignment')
-_db_utils = _MODELLER.module("inro.emme.utility.database_utilities")
-extended_assignment_tool = _MODELLER.tool(
-    "inro.emme.transit_assignment.extended_transit_assignment"
-)
 network_calc_tool = _MODELLER.tool("inro.emme.network_calculation.network_calculator")
-network_results_tool = _MODELLER.tool(
-    "inro.emme.transit_assignment.extended.network_results"
-)
-matrix_results_tool = _MODELLER.tool(
-    "inro.emme.transit_assignment.extended.matrix_results"
-)
-strategy_analysis_tool = _MODELLER.tool(
-    "inro.emme.transit_assignment.extended.strategy_based_analysis"
-)
-matrix_calc_tool = _MODELLER.tool("inro.emme.matrix_calculation.matrix_calculator")
 null_pointer_exception = _util.null_pointer_exception
-
 EMME_VERSION = _util.get_emme_version(tuple)
 
 
@@ -119,9 +96,6 @@ class AssignTransit(_m.Tool()):
             branding_text="- TMG Toolbox",
         )
         return pb.render()
-
-    def run(self):
-        ...
 
     def __call__(self, parameters):
         scenario = self._load_scenario(parameters["scenario_number"])
@@ -160,7 +134,7 @@ class AssignTransit(_m.Tool()):
                 changes = self._heal_travel_time_functions()
                 if changes == 0:
                     _write("No problems were found")
-            with self._temp_matrix_manager() as temp_matrix_list:
+            with _util.temporary_matrix_manager() as temp_matrix_list:
                 # Initialize matrices with matrix ID = "mf0" not loaded in load_input_matrix_list
                 demand_matrix_list = self._init_input_matrices(
                     load_input_matrix_list, temp_matrix_list
@@ -205,15 +179,23 @@ class AssignTransit(_m.Tool()):
                     parameters, temp_matrix_list
                 )
                 self._change_walk_speed(scenario, parameters["walk_speed"])
-                with self._temp_attribute_manager(scenario) as temp_attribute_list:
+                with _util.temporary_attribute_manager(scenario) as temp_attribute_list:
                     effective_headway_attribute_list = (
-                        self._create_effective_headway_attribute_list(
-                            scenario, parameters, temp_attribute_list
+                        self._create_headway_attribute_list(
+                            scenario,
+                            "TRANSIT_LINE",
+                            temp_attribute_list,
+                            default_value=0.0,
+                            hdw_att_name=parameters["effective_headway_attribute"],
                         )
                     )
                     headway_fraction_attribute_list = (
-                        self._create_headway_fraction_attribute_list(
-                            scenario, parameters, temp_attribute_list
+                        self._create_headway_attribute_list(
+                            scenario,
+                            "NODE",
+                            temp_attribute_list,
+                            default_value=0.5,
+                            hdw_att_name=parameters["headway_fraction_attribute"],
                         )
                     )
                     walk_time_peception_attribute_list = (
@@ -228,7 +210,6 @@ class AssignTransit(_m.Tool()):
                         effective_headway_attribute_list[0].id,
                     )
                     self._tracker.complete_subtask()
-                    self._tracker.complete_subtask()
 
     # ---LOAD - SUB FUNCTIONS -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     def _load_scenario(self, scenario_number):
@@ -238,7 +219,7 @@ class AssignTransit(_m.Tool()):
         return scenario
 
     def _load_atts(self, scenario, parameters):
-        # TODO: Load atts
+        # TODO
         atts = {}
         return atts
 
@@ -387,27 +368,14 @@ class AssignTransit(_m.Tool()):
 
     def _change_walk_speed(self, scenario, walk_speed):
         with _trace("Setting walk speeds to %s" % walk_speed):
-            if EMME_VERSION >= (4, 1):
-                self._change_walk_speed_4p1(scenario, walk_speed)
-            else:
-                self._change_walk_speed_4p0(scenario, walk_speed)
-
-    def _change_walk_speed_4p0(self, scenario, walk_speed):
-        change_mode_tool = _MODELLER.tool("inro.emme.data.network.mode.change_mode")
-        for mode in scenario.modes():
-            if mode.type != "AUX_TRANSIT":
-                continue
-            change_mode_tool(mode, mode_speed=walk_speed, scenario=scenario)
-
-    def _change_walk_speed_4p1(self, scenario, walk_speed):
-        partial_network = scenario.get_partial_network(["MODE"], True)
-        for mode in partial_network.modes():
-            if mode.type != "AUX_TRANSIT":
-                continue
-            mode.speed = walk_speed
-            _write("Changed mode %s" % mode.id)
-        baton = partial_network.get_attribute_values("MODE", ["speed"])
-        scenario.set_attribute_values("MODE", ["speed"], baton)
+            partial_network = scenario.get_partial_network(["MODE"], True)
+            for mode in partial_network.modes():
+                if mode.type != "AUX_TRANSIT":
+                    continue
+                mode.speed = walk_speed
+                _write("Changed mode %s" % mode.id)
+            baton = partial_network.get_attribute_values("MODE", ["speed"])
+            scenario.set_attribute_values("MODE", ["speed"], baton)
 
     def _create_walk_time_peception_attribute_list(
         self, scenario, parameters, temp_matrix_list
@@ -424,33 +392,24 @@ class AssignTransit(_m.Tool()):
             temp_matrix_list.append(walk_time_peception_attribute)
         return walk_time_peception_attribute_list
 
-    def _create_headway_fraction_attribute_list(
-        self, scenario, parameters, temp_matrix_list
+    def _create_headway_attribute_list(
+        self,
+        scenario,
+        attribute_type,
+        temp_matrix_list,
+        default_value=0.0,
+        hdw_att_name="",
     ):
-        headway_fraction_attribute_list = []
-        headway_fraction_attribute = self._create_temp_attribute(
+        headway_attribute_list = []
+        headway_attribute = self._create_temp_attribute(
             scenario,
-            str(parameters["headway_fraction_attribute"]),
-            "NODE",
-            default_value=0.5,
+            str(hdw_att_name),
+            str(attribute_type),
+            default_value=default_value,
         )
-        headway_fraction_attribute_list.append(headway_fraction_attribute)
-        temp_matrix_list.append(headway_fraction_attribute)
-        return headway_fraction_attribute_list
-
-    def _create_effective_headway_attribute_list(
-        self, scenario, parameters, temp_matrix_list
-    ):
-        effective_headway_attribute_list = []
-        effective_headway_attribute = self._create_temp_attribute(
-            scenario,
-            str(parameters["effective_headway_attribute"]),
-            "TRANSIT_LINE",
-            default_value=0.0,
-        )
-        effective_headway_attribute_list.append(effective_headway_attribute)
-        temp_matrix_list.append(effective_headway_attribute)
-        return effective_headway_attribute_list
+        headway_attribute_list.append(headway_attribute)
+        temp_matrix_list.append(headway_attribute)
+        return headway_attribute_list
 
     def _create_temp_attribute(
         self,
@@ -464,14 +423,12 @@ class AssignTransit(_m.Tool()):
         Creates a temporary extra attribute in a given scenario
         """
         ATTRIBUTE_TYPES = ["NODE", "LINK", "TURN", "TRANSIT_LINE", "TRANSIT_SEGMENT"]
-
         attribute_type = str(attribute_type).upper()
         # check if the type provided is correct
         if attribute_type not in ATTRIBUTE_TYPES:
             raise TypeError(
                 "Attribute type '%s' provided is not recognized." % attribute_type
             )
-
         if len(attribute_id) > 18:
             raise ValueError(
                 "Attribute id '%s' can only be 19 characters long with no spaces plus no '@'."
@@ -502,7 +459,6 @@ class AssignTransit(_m.Tool()):
                     default_value
                 )
                 break
-
         msg = "Created temporary extra attribute %s in scenario %s" % (
             attrib_id,
             scenario.id,
@@ -511,7 +467,6 @@ class AssignTransit(_m.Tool()):
             temp_extra_attribute.description = description
             msg += ": %s" % description
         _write(msg)
-
         return temp_extra_attribute
 
     def _assign_effective_headway(
@@ -535,67 +490,6 @@ class AssignTransit(_m.Tool()):
         }
         network_calc_tool(small_headway_spec, scenario)
         network_calc_tool(large_headway_spec, scenario)
-
-    # ---CALCULATE - SUB FUNCTIONS-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    @contextmanager
-    def _temp_matrix_manager(self):
-        """
-        Matrix objects created & added to this matrix list are deleted when this manager exits.
-        """
-        temp_matrix_list = []
-        try:
-            yield temp_matrix_list
-        finally:
-            for matrix in temp_matrix_list:
-                if matrix is not None:
-                    _write("Deleting temporary matrix '%s': " % matrix.id)
-                    _bank.delete_matrix(matrix.id)
-
-    @contextmanager
-    def _temp_attribute_manager(self, scenario):
-        temp_attribute_list = []
-        try:
-            yield temp_attribute_list
-        finally:
-            for temp_attribute in temp_attribute_list:
-                if temp_attribute is not None:
-                    scenario.delete_extra_attribute(temp_attribute.id)
-                    _write("Deleted temporary '%s' link attribute" % temp_attribute.id)
-
-    @_m.method(return_type=str)
-    def get_scenario_node_attributes(self, scenario):
-        options = ["<option value='-1'>None</option>"]
-        for exatt in scenario.extra_attributes():
-            if exatt.type == "NODE":
-                options.append(
-                    '<option value="%s">%s - %s</option>'
-                    % (exatt.id, exatt.id, exatt.description)
-                )
-        return "\n".join(options)
-
-    @_m.method(return_type=str)
-    def get_scenario_link_attributes(self, scenario, include_none=True):
-        options = []
-        if include_none:
-            options.append("<option value='-1'>None</option>")
-        for exatt in scenario.extra_attributes():
-            if exatt.type == "LINK":
-                options.append(
-                    '<option value="%s">%s - %s</option>'
-                    % (exatt.id, exatt.id, exatt.description)
-                )
-        return "\n".join(options)
-
-    @_m.method(return_type=str)
-    def get_scenario_segment_attribtues(self, scenario):
-        options = []
-        for exatt in scenario.extra_attributes():
-            if exatt.type == "TRANSIT_SEGMENT":
-                options.append(
-                    '<option value="%s">%s - %s</option>'
-                    % (exatt.id, exatt.id, exatt.description)
-                )
-        return "\n".join(options)
 
     @_m.method(return_type=_m.TupleType)
     def percent_completed(self):
